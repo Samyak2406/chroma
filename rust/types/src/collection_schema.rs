@@ -5583,4 +5583,802 @@ mod tests {
         assert!(schema.keys.contains_key(EMBEDDING_KEY));
         assert_eq!(schema.keys.len(), 3);
     }
+
+    #[cfg(feature = "testing")]
+    mod proptests {
+        use super::*;
+        use crate::hnsw_configuration::Space;
+        use crate::{
+            HnswIndexConfig, SpannIndexConfig, VectorIndexConfig, DOCUMENT_KEY, EMBEDDING_KEY,
+        };
+        use proptest::prelude::*;
+        use proptest::strategy::BoxedStrategy;
+        use proptest::string::string_regex;
+        use serde_json::json;
+
+        fn embedding_function_strategy(
+        ) -> impl Strategy<Value = Option<EmbeddingFunctionConfiguration>> {
+            let known_strategy = string_regex("[a-z]{1,16}").unwrap().prop_map(|name| {
+                EmbeddingFunctionConfiguration::Known(EmbeddingFunctionNewConfiguration {
+                    name,
+                    config: json!({ "alpha": 1 }),
+                })
+            });
+
+            proptest::option::of(prop_oneof![
+                Just(EmbeddingFunctionConfiguration::Legacy),
+                known_strategy,
+            ])
+        }
+
+        fn default_embedding_function_strategy(
+        ) -> impl Strategy<Value = Option<EmbeddingFunctionConfiguration>> {
+            proptest::option::of(prop_oneof![
+                Just(EmbeddingFunctionConfiguration::Unknown),
+                Just(EmbeddingFunctionConfiguration::Known(
+                    EmbeddingFunctionNewConfiguration {
+                        name: "default".to_string(),
+                        config: json!({ "alpha": 1 }),
+                    }
+                )),
+            ])
+        }
+
+        fn sparse_embedding_function_strategy(
+        ) -> impl Strategy<Value = Option<EmbeddingFunctionConfiguration>> {
+            let known_strategy = string_regex("[a-z]{1,16}").unwrap().prop_map(|name| {
+                EmbeddingFunctionConfiguration::Known(EmbeddingFunctionNewConfiguration {
+                    name,
+                    config: json!({ "alpha": 1 }),
+                })
+            });
+
+            proptest::option::of(prop_oneof![
+                Just(EmbeddingFunctionConfiguration::Unknown),
+                known_strategy,
+            ])
+        }
+
+        fn space_strategy() -> impl Strategy<Value = Space> {
+            prop_oneof![Just(Space::L2), Just(Space::Cosine), Just(Space::Ip),]
+        }
+
+        fn internal_hnsw_configuration_strategy() -> impl Strategy<Value = InternalHnswConfiguration>
+        {
+            (
+                space_strategy(),
+                1usize..=256,
+                1usize..=256,
+                1usize..=64,
+                1usize..=32,
+                prop_oneof![Just(0.5f64), Just(1.0f64), Just(1.5f64), Just(2.0f64)],
+                2usize..=4096,
+                2usize..=4096,
+            )
+                .prop_map(
+                    |(
+                        space,
+                        ef_construction,
+                        ef_search,
+                        max_neighbors,
+                        num_threads,
+                        resize_factor,
+                        sync_threshold,
+                        batch_size,
+                    )| InternalHnswConfiguration {
+                        space,
+                        ef_construction,
+                        ef_search,
+                        max_neighbors,
+                        num_threads,
+                        resize_factor,
+                        sync_threshold,
+                        batch_size,
+                    },
+                )
+        }
+
+        fn spann_epsilon_strategy() -> impl Strategy<Value = f32> {
+            prop_oneof![Just(5.0f32), Just(7.5f32), Just(10.0f32)]
+        }
+
+        fn internal_spann_configuration_strategy(
+        ) -> impl Strategy<Value = InternalSpannConfiguration> {
+            (
+                (
+                    1u32..=128,               // search_nprobe (max 128)
+                    Just(1.0f32),             // search_rng_factor (validated == 1.0)
+                    spann_epsilon_strategy(), // search_rng_epsilon ∈ [5, 10]
+                    1u32..=64,                // write_nprobe (max 64)
+                    1u32..=8,                 // nreplica_count (max 8)
+                    Just(1.0f32),             // write_rng_factor (validated == 1.0)
+                    spann_epsilon_strategy(), // write_rng_epsilon ∈ [5, 10]
+                    50u32..=200,              // split_threshold (min 50, max 200)
+                    1usize..=1000,            // num_samples_kmeans (max 1000)
+                ),
+                (
+                    Just(100.0f32),   // initial_lambda (validated == 100)
+                    1u32..=64,        // reassign_neighbor_count (max 64)
+                    25u32..=100,      // merge_threshold (min 25, max 100)
+                    1u32..=8,         // num_centers_to_merge_to (max 8)
+                    space_strategy(), // space
+                    1usize..=200,     // ef_construction (max 200)
+                    1usize..=200,     // ef_search (max 200)
+                    1usize..=64,      // max_neighbors (max 64)
+                ),
+            )
+                .prop_map(
+                    |(
+                        (
+                            search_nprobe,
+                            search_rng_factor,
+                            search_rng_epsilon,
+                            write_nprobe,
+                            nreplica_count,
+                            write_rng_factor,
+                            write_rng_epsilon,
+                            split_threshold,
+                            num_samples_kmeans,
+                        ),
+                        (
+                            initial_lambda,
+                            reassign_neighbor_count,
+                            merge_threshold,
+                            num_centers_to_merge_to,
+                            space,
+                            ef_construction,
+                            ef_search,
+                            max_neighbors,
+                        ),
+                    )| InternalSpannConfiguration {
+                        search_nprobe,
+                        search_rng_factor,
+                        search_rng_epsilon,
+                        write_nprobe,
+                        nreplica_count,
+                        write_rng_factor,
+                        write_rng_epsilon,
+                        split_threshold,
+                        num_samples_kmeans,
+                        initial_lambda,
+                        reassign_neighbor_count,
+                        merge_threshold,
+                        num_centers_to_merge_to,
+                        space,
+                        ef_construction,
+                        ef_search,
+                        max_neighbors,
+                    },
+                )
+        }
+
+        fn internal_collection_configuration_strategy(
+        ) -> impl Strategy<Value = InternalCollectionConfiguration> {
+            prop_oneof![
+                (
+                    internal_hnsw_configuration_strategy(),
+                    embedding_function_strategy()
+                )
+                    .prop_map(|(hnsw, embedding_function)| {
+                        InternalCollectionConfiguration {
+                            vector_index: VectorIndexConfiguration::Hnsw(hnsw),
+                            embedding_function,
+                        }
+                    }),
+                (
+                    internal_spann_configuration_strategy(),
+                    embedding_function_strategy()
+                )
+                    .prop_map(|(spann, embedding_function)| {
+                        InternalCollectionConfiguration {
+                            vector_index: VectorIndexConfiguration::Spann(spann),
+                            embedding_function,
+                        }
+                    }),
+            ]
+        }
+
+        fn non_default_internal_collection_configuration_strategy(
+        ) -> impl Strategy<Value = InternalCollectionConfiguration> {
+            internal_collection_configuration_strategy()
+                .prop_filter("non-default configuration", |config| !config.is_default())
+        }
+
+        fn knn_index_strategy() -> impl Strategy<Value = KnnIndex> {
+            prop_oneof![Just(KnnIndex::Hnsw), Just(KnnIndex::Spann),]
+        }
+
+        fn expected_vector_index_config(
+            config: &InternalCollectionConfiguration,
+        ) -> VectorIndexConfig {
+            match &config.vector_index {
+                VectorIndexConfiguration::Hnsw(hnsw_config) => VectorIndexConfig {
+                    space: Some(hnsw_config.space.clone()),
+                    embedding_function: config.embedding_function.clone(),
+                    source_key: None,
+                    hnsw: Some(HnswIndexConfig {
+                        ef_construction: Some(hnsw_config.ef_construction),
+                        max_neighbors: Some(hnsw_config.max_neighbors),
+                        ef_search: Some(hnsw_config.ef_search),
+                        num_threads: Some(hnsw_config.num_threads),
+                        batch_size: Some(hnsw_config.batch_size),
+                        sync_threshold: Some(hnsw_config.sync_threshold),
+                        resize_factor: Some(hnsw_config.resize_factor),
+                    }),
+                    spann: None,
+                },
+                VectorIndexConfiguration::Spann(spann_config) => VectorIndexConfig {
+                    space: Some(spann_config.space.clone()),
+                    embedding_function: config.embedding_function.clone(),
+                    source_key: None,
+                    hnsw: None,
+                    spann: Some(SpannIndexConfig {
+                        search_nprobe: Some(spann_config.search_nprobe),
+                        search_rng_factor: Some(spann_config.search_rng_factor),
+                        search_rng_epsilon: Some(spann_config.search_rng_epsilon),
+                        nreplica_count: Some(spann_config.nreplica_count),
+                        write_rng_factor: Some(spann_config.write_rng_factor),
+                        write_rng_epsilon: Some(spann_config.write_rng_epsilon),
+                        split_threshold: Some(spann_config.split_threshold),
+                        num_samples_kmeans: Some(spann_config.num_samples_kmeans),
+                        initial_lambda: Some(spann_config.initial_lambda),
+                        reassign_neighbor_count: Some(spann_config.reassign_neighbor_count),
+                        merge_threshold: Some(spann_config.merge_threshold),
+                        num_centers_to_merge_to: Some(spann_config.num_centers_to_merge_to),
+                        write_nprobe: Some(spann_config.write_nprobe),
+                        ef_construction: Some(spann_config.ef_construction),
+                        ef_search: Some(spann_config.ef_search),
+                        max_neighbors: Some(spann_config.max_neighbors),
+                    }),
+                },
+            }
+        }
+
+        fn non_special_key_strategy() -> BoxedStrategy<String> {
+            string_regex("[a-z]{1,16}")
+                .unwrap()
+                .prop_filter("exclude special keys", |key| {
+                    key != DOCUMENT_KEY && key != EMBEDDING_KEY
+                })
+                .boxed()
+        }
+
+        fn source_key_strategy() -> BoxedStrategy<Option<String>> {
+            proptest::option::of(prop_oneof![
+                Just(DOCUMENT_KEY.to_string()),
+                string_regex("[a-z]{1,16}").unwrap(),
+            ])
+            .boxed()
+        }
+
+        fn fts_index_type_strategy() -> impl Strategy<Value = FtsIndexType> {
+            any::<bool>().prop_map(|enabled| FtsIndexType {
+                enabled,
+                config: FtsIndexConfig {},
+            })
+        }
+
+        fn string_inverted_index_type_strategy() -> impl Strategy<Value = StringInvertedIndexType> {
+            any::<bool>().prop_map(|enabled| StringInvertedIndexType {
+                enabled,
+                config: StringInvertedIndexConfig {},
+            })
+        }
+
+        fn string_value_type_strategy() -> BoxedStrategy<Option<StringValueType>> {
+            proptest::option::of(
+                (
+                    proptest::option::of(string_inverted_index_type_strategy()),
+                    proptest::option::of(fts_index_type_strategy()),
+                )
+                    .prop_map(|(string_inverted_index, fts_index)| {
+                        StringValueType {
+                            string_inverted_index,
+                            fts_index,
+                        }
+                    }),
+            )
+            .boxed()
+        }
+
+        fn float_inverted_index_type_strategy() -> impl Strategy<Value = FloatInvertedIndexType> {
+            any::<bool>().prop_map(|enabled| FloatInvertedIndexType {
+                enabled,
+                config: FloatInvertedIndexConfig {},
+            })
+        }
+
+        fn float_value_type_strategy() -> BoxedStrategy<Option<FloatValueType>> {
+            proptest::option::of(
+                proptest::option::of(float_inverted_index_type_strategy()).prop_map(
+                    |float_inverted_index| FloatValueType {
+                        float_inverted_index,
+                    },
+                ),
+            )
+            .boxed()
+        }
+
+        fn int_inverted_index_type_strategy() -> impl Strategy<Value = IntInvertedIndexType> {
+            any::<bool>().prop_map(|enabled| IntInvertedIndexType {
+                enabled,
+                config: IntInvertedIndexConfig {},
+            })
+        }
+
+        fn int_value_type_strategy() -> BoxedStrategy<Option<IntValueType>> {
+            proptest::option::of(
+                proptest::option::of(int_inverted_index_type_strategy())
+                    .prop_map(|int_inverted_index| IntValueType { int_inverted_index }),
+            )
+            .boxed()
+        }
+
+        fn bool_inverted_index_type_strategy() -> impl Strategy<Value = BoolInvertedIndexType> {
+            any::<bool>().prop_map(|enabled| BoolInvertedIndexType {
+                enabled,
+                config: BoolInvertedIndexConfig {},
+            })
+        }
+
+        fn bool_value_type_strategy() -> BoxedStrategy<Option<BoolValueType>> {
+            proptest::option::of(
+                proptest::option::of(bool_inverted_index_type_strategy()).prop_map(
+                    |bool_inverted_index| BoolValueType {
+                        bool_inverted_index,
+                    },
+                ),
+            )
+            .boxed()
+        }
+
+        fn sparse_vector_index_config_strategy() -> impl Strategy<Value = SparseVectorIndexConfig> {
+            (
+                sparse_embedding_function_strategy(),
+                source_key_strategy(),
+                proptest::option::of(any::<bool>()),
+            )
+                .prop_map(|(embedding_function, source_key, bm25)| {
+                    SparseVectorIndexConfig {
+                        embedding_function,
+                        source_key,
+                        bm25,
+                    }
+                })
+        }
+
+        fn sparse_vector_value_type_strategy() -> BoxedStrategy<Option<SparseVectorValueType>> {
+            proptest::option::of(
+                (
+                    any::<bool>(),
+                    proptest::option::of(sparse_vector_index_config_strategy()),
+                )
+                    .prop_map(|(enabled, config)| SparseVectorValueType {
+                        sparse_vector_index: config.map(|cfg| SparseVectorIndexType {
+                            enabled,
+                            config: cfg,
+                        }),
+                    }),
+            )
+            .boxed()
+        }
+
+        fn hnsw_index_config_strategy() -> impl Strategy<Value = HnswIndexConfig> {
+            internal_hnsw_configuration_strategy().prop_map(|config| HnswIndexConfig {
+                ef_construction: Some(config.ef_construction),
+                max_neighbors: Some(config.max_neighbors),
+                ef_search: Some(config.ef_search),
+                num_threads: Some(config.num_threads),
+                batch_size: Some(config.batch_size),
+                sync_threshold: Some(config.sync_threshold),
+                resize_factor: Some(config.resize_factor),
+            })
+        }
+
+        fn spann_index_config_strategy() -> impl Strategy<Value = SpannIndexConfig> {
+            internal_spann_configuration_strategy().prop_map(|config| SpannIndexConfig {
+                search_nprobe: Some(config.search_nprobe),
+                search_rng_factor: Some(config.search_rng_factor),
+                search_rng_epsilon: Some(config.search_rng_epsilon),
+                nreplica_count: Some(config.nreplica_count),
+                write_rng_factor: Some(config.write_rng_factor),
+                write_rng_epsilon: Some(config.write_rng_epsilon),
+                split_threshold: Some(config.split_threshold),
+                num_samples_kmeans: Some(config.num_samples_kmeans),
+                initial_lambda: Some(config.initial_lambda),
+                reassign_neighbor_count: Some(config.reassign_neighbor_count),
+                merge_threshold: Some(config.merge_threshold),
+                num_centers_to_merge_to: Some(config.num_centers_to_merge_to),
+                write_nprobe: Some(config.write_nprobe),
+                ef_construction: Some(config.ef_construction),
+                ef_search: Some(config.ef_search),
+                max_neighbors: Some(config.max_neighbors),
+            })
+        }
+
+        fn vector_index_config_strategy() -> impl Strategy<Value = VectorIndexConfig> {
+            (
+                proptest::option::of(space_strategy()),
+                embedding_function_strategy(),
+                source_key_strategy(),
+                proptest::option::of(hnsw_index_config_strategy()),
+                proptest::option::of(spann_index_config_strategy()),
+            )
+                .prop_map(|(space, embedding_function, source_key, hnsw, spann)| {
+                    VectorIndexConfig {
+                        space,
+                        embedding_function,
+                        source_key,
+                        hnsw,
+                        spann,
+                    }
+                })
+        }
+
+        fn vector_index_type_strategy() -> impl Strategy<Value = VectorIndexType> {
+            (any::<bool>(), vector_index_config_strategy())
+                .prop_map(|(enabled, config)| VectorIndexType { enabled, config })
+        }
+
+        fn float_list_value_type_strategy() -> BoxedStrategy<Option<FloatListValueType>> {
+            proptest::option::of(
+                proptest::option::of(vector_index_type_strategy())
+                    .prop_map(|vector_index| FloatListValueType { vector_index }),
+            )
+            .boxed()
+        }
+
+        fn value_types_strategy() -> BoxedStrategy<ValueTypes> {
+            (
+                string_value_type_strategy(),
+                float_list_value_type_strategy(),
+                sparse_vector_value_type_strategy(),
+                int_value_type_strategy(),
+                float_value_type_strategy(),
+                bool_value_type_strategy(),
+            )
+                .prop_map(
+                    |(string, float_list, sparse_vector, int, float, boolean)| ValueTypes {
+                        string,
+                        float_list,
+                        sparse_vector,
+                        int,
+                        float,
+                        boolean,
+                    },
+                )
+                .boxed()
+        }
+
+        fn schema_strategy() -> BoxedStrategy<Schema> {
+            (
+                value_types_strategy(),
+                proptest::collection::hash_map(
+                    non_special_key_strategy(),
+                    value_types_strategy(),
+                    0..=3,
+                ),
+                proptest::option::of(value_types_strategy()),
+                proptest::option::of(value_types_strategy()),
+            )
+                .prop_map(
+                    |(defaults, mut extra_keys, document_override, embedding_override)| {
+                        if let Some(doc) = document_override {
+                            extra_keys.insert(DOCUMENT_KEY.to_string(), doc);
+                        }
+                        if let Some(embed) = embedding_override {
+                            extra_keys.insert(EMBEDDING_KEY.to_string(), embed);
+                        }
+                        Schema {
+                            defaults,
+                            keys: extra_keys,
+                        }
+                    },
+                )
+                .boxed()
+        }
+
+        fn force_non_default_schema(mut schema: Schema) -> Schema {
+            if schema.is_default() {
+                if let Some(string_value) = schema
+                    .defaults
+                    .string
+                    .as_mut()
+                    .and_then(|string_value| string_value.string_inverted_index.as_mut())
+                {
+                    string_value.enabled = !string_value.enabled;
+                } else {
+                    schema.defaults.string = Some(StringValueType {
+                        string_inverted_index: Some(StringInvertedIndexType {
+                            enabled: false,
+                            config: StringInvertedIndexConfig {},
+                        }),
+                        fts_index: None,
+                    });
+                }
+            }
+            schema
+        }
+
+        fn non_default_schema_strategy() -> BoxedStrategy<Schema> {
+            schema_strategy().prop_map(force_non_default_schema).boxed()
+        }
+
+        fn merge_hnsw_configs_reference(
+            base: Option<&HnswIndexConfig>,
+            user: Option<&HnswIndexConfig>,
+        ) -> Option<HnswIndexConfig> {
+            match (base, user) {
+                (Some(base), Some(user)) => Some(HnswIndexConfig {
+                    ef_construction: user.ef_construction.or(base.ef_construction),
+                    max_neighbors: user.max_neighbors.or(base.max_neighbors),
+                    ef_search: user.ef_search.or(base.ef_search),
+                    num_threads: user.num_threads.or(base.num_threads),
+                    batch_size: user.batch_size.or(base.batch_size),
+                    sync_threshold: user.sync_threshold.or(base.sync_threshold),
+                    resize_factor: user.resize_factor.or(base.resize_factor),
+                }),
+                (Some(base), None) => Some(base.clone()),
+                (None, Some(user)) => Some(user.clone()),
+                (None, None) => None,
+            }
+        }
+
+        fn merge_spann_configs_reference(
+            base: Option<&SpannIndexConfig>,
+            user: Option<&SpannIndexConfig>,
+        ) -> Option<SpannIndexConfig> {
+            match (base, user) {
+                (Some(base), Some(user)) => Some(SpannIndexConfig {
+                    search_nprobe: user.search_nprobe.or(base.search_nprobe),
+                    search_rng_factor: user.search_rng_factor.or(base.search_rng_factor),
+                    search_rng_epsilon: user.search_rng_epsilon.or(base.search_rng_epsilon),
+                    nreplica_count: user.nreplica_count.or(base.nreplica_count),
+                    write_rng_factor: user.write_rng_factor.or(base.write_rng_factor),
+                    write_rng_epsilon: user.write_rng_epsilon.or(base.write_rng_epsilon),
+                    split_threshold: user.split_threshold.or(base.split_threshold),
+                    num_samples_kmeans: user.num_samples_kmeans.or(base.num_samples_kmeans),
+                    initial_lambda: user.initial_lambda.or(base.initial_lambda),
+                    reassign_neighbor_count: user
+                        .reassign_neighbor_count
+                        .or(base.reassign_neighbor_count),
+                    merge_threshold: user.merge_threshold.or(base.merge_threshold),
+                    num_centers_to_merge_to: user
+                        .num_centers_to_merge_to
+                        .or(base.num_centers_to_merge_to),
+                    write_nprobe: user.write_nprobe.or(base.write_nprobe),
+                    ef_construction: user.ef_construction.or(base.ef_construction),
+                    ef_search: user.ef_search.or(base.ef_search),
+                    max_neighbors: user.max_neighbors.or(base.max_neighbors),
+                }),
+                (Some(base), None) => Some(base.clone()),
+                (None, Some(user)) => Some(user.clone()),
+                (None, None) => None,
+            }
+        }
+
+        fn merge_vector_index_configs_reference(
+            base: &VectorIndexConfig,
+            user: &VectorIndexConfig,
+            knn: KnnIndex,
+        ) -> VectorIndexConfig {
+            match knn {
+                KnnIndex::Hnsw => VectorIndexConfig {
+                    space: user.space.clone().or(base.space.clone()),
+                    embedding_function: user
+                        .embedding_function
+                        .clone()
+                        .or(base.embedding_function.clone()),
+                    source_key: user.source_key.clone().or(base.source_key.clone()),
+                    hnsw: merge_hnsw_configs_reference(base.hnsw.as_ref(), user.hnsw.as_ref()),
+                    spann: None,
+                },
+                KnnIndex::Spann => VectorIndexConfig {
+                    space: user.space.clone().or(base.space.clone()),
+                    embedding_function: user
+                        .embedding_function
+                        .clone()
+                        .or(base.embedding_function.clone()),
+                    source_key: user.source_key.clone().or(base.source_key.clone()),
+                    hnsw: None,
+                    spann: merge_spann_configs_reference(base.spann.as_ref(), user.spann.as_ref()),
+                },
+            }
+        }
+
+        fn apply_float_list_override(
+            float_list: Option<&FloatListValueType>,
+            current: &mut VectorIndexConfig,
+            knn: KnnIndex,
+        ) {
+            if let Some(float_list) = float_list {
+                if let Some(vector_index) = &float_list.vector_index {
+                    *current =
+                        merge_vector_index_configs_reference(current, &vector_index.config, knn);
+                }
+            }
+        }
+
+        fn default_vector_index_configs(knn: KnnIndex) -> (VectorIndexConfig, VectorIndexConfig) {
+            let default_schema = Schema::new_default(knn);
+            let defaults = default_schema
+                .defaults
+                .float_list
+                .as_ref()
+                .and_then(|fl| fl.vector_index.as_ref())
+                .map(|vi| vi.config.clone())
+                .expect("default schema should include defaults vector index");
+
+            let embedding = default_schema
+                .keys
+                .get(EMBEDDING_KEY)
+                .and_then(|value_types| value_types.float_list.as_ref())
+                .and_then(|fl| fl.vector_index.as_ref())
+                .map(|vi| vi.config.clone())
+                .expect("#embedding should include vector index");
+
+            (defaults, embedding)
+        }
+
+        fn reference_schema_vector_configs(
+            schema: Option<&Schema>,
+            knn: KnnIndex,
+        ) -> (VectorIndexConfig, VectorIndexConfig) {
+            let (mut defaults_config, mut embedding_config) = default_vector_index_configs(knn);
+
+            if let Some(schema) = schema {
+                apply_float_list_override(
+                    schema.defaults.float_list.as_ref(),
+                    &mut defaults_config,
+                    knn,
+                );
+
+                if let Some(embedding_values) = schema.keys.get(EMBEDDING_KEY) {
+                    apply_float_list_override(
+                        embedding_values.float_list.as_ref(),
+                        &mut embedding_config,
+                        knn,
+                    );
+                }
+            }
+
+            (defaults_config, embedding_config)
+        }
+
+        fn extract_vector_configs(schema: &Schema) -> (VectorIndexConfig, VectorIndexConfig) {
+            let defaults = schema
+                .defaults
+                .float_list
+                .as_ref()
+                .and_then(|fl| fl.vector_index.as_ref())
+                .map(|vi| vi.config.clone())
+                .expect("defaults vector index missing");
+
+            let embedding = schema
+                .keys
+                .get(EMBEDDING_KEY)
+                .and_then(|value_types| value_types.float_list.as_ref())
+                .and_then(|fl| fl.vector_index.as_ref())
+                .map(|vi| vi.config.clone())
+                .expect("#embedding vector index missing");
+
+            (defaults, embedding)
+        }
+
+        proptest! {
+            #[test]
+            fn reconcile_schema_and_config_matches_convert_for_config_only(
+                config in internal_collection_configuration_strategy(),
+                knn in knn_index_strategy(),
+            ) {
+                let result = Schema::reconcile_schema_and_config(None, Some(&config), knn)
+                    .expect("reconciliation should succeed");
+
+                let (defaults_vi, embedding_vi) = extract_vector_configs(&result);
+                let expected_config = expected_vector_index_config(&config);
+
+                prop_assert_eq!(defaults_vi, expected_config.clone());
+
+                let mut expected_embedding_config = expected_config;
+                expected_embedding_config.source_key = Some(DOCUMENT_KEY.to_string());
+                prop_assert_eq!(embedding_vi, expected_embedding_config);
+
+                prop_assert_eq!(result.keys.len(), 2);
+            }
+        }
+
+        proptest! {
+            #[test]
+            fn reconcile_schema_and_config_errors_when_both_non_default(
+                config in non_default_internal_collection_configuration_strategy(),
+                knn in knn_index_strategy(),
+            ) {
+                let schema = Schema::try_from(&config)
+                    .expect("conversion should succeed");
+                prop_assume!(!schema.is_default());
+
+                let result = Schema::reconcile_schema_and_config(Some(&schema), Some(&config), knn);
+
+                prop_assert!(matches!(result, Err(SchemaError::ConfigAndSchemaConflict)));
+            }
+        }
+
+        proptest! {
+            #[test]
+            fn reconcile_schema_and_config_matches_schema_only_path(
+                schema in schema_strategy(),
+                knn in knn_index_strategy(),
+            ) {
+                let result = Schema::reconcile_schema_and_config(Some(&schema), None, knn)
+                    .expect("reconciliation should succeed");
+
+                let (expected_defaults, expected_embedding) =
+                    reference_schema_vector_configs(Some(&schema), knn);
+                let (defaults_vi, embedding_vi) = extract_vector_configs(&result);
+
+                prop_assert_eq!(defaults_vi, expected_defaults);
+                prop_assert_eq!(embedding_vi, expected_embedding);
+            }
+        }
+
+        proptest! {
+            #[test]
+            fn reconcile_schema_and_config_with_default_schema_and_default_config_applies_embedding_function(
+                embedding_function in default_embedding_function_strategy(),
+                knn in knn_index_strategy(),
+            ) {
+                let schema = Schema::new_default(knn);
+                let mut config = match knn {
+                    KnnIndex::Hnsw => InternalCollectionConfiguration::default_hnsw(),
+                    KnnIndex::Spann => InternalCollectionConfiguration::default_spann(),
+                };
+                config.embedding_function = embedding_function.clone();
+
+                let result = Schema::reconcile_schema_and_config(
+                    Some(&schema),
+                    Some(&config),
+                    knn,
+                )
+                .expect("reconciliation should succeed");
+
+                let (mut expected_defaults, mut expected_embedding) =
+                    reference_schema_vector_configs(Some(&schema), knn);
+                if let Some(ef) = embedding_function {
+                    expected_defaults.embedding_function = Some(ef.clone());
+                    expected_embedding.embedding_function = Some(ef);
+                }
+
+                let (defaults_vi, embedding_vi) = extract_vector_configs(&result);
+                prop_assert_eq!(defaults_vi, expected_defaults);
+                prop_assert_eq!(embedding_vi, expected_embedding);
+            }
+        }
+
+        proptest! {
+            #[test]
+            fn reconcile_schema_and_config_with_default_config_keeps_non_default_schema(
+                schema in non_default_schema_strategy(),
+                knn in knn_index_strategy(),
+            ) {
+                let default_config = match knn {
+                    KnnIndex::Hnsw => InternalCollectionConfiguration::default_hnsw(),
+                    KnnIndex::Spann => InternalCollectionConfiguration::default_spann(),
+                };
+
+                let result = Schema::reconcile_schema_and_config(
+                    Some(&schema),
+                    Some(&default_config),
+                    knn,
+                )
+                .expect("reconciliation should succeed");
+
+                let (expected_defaults, expected_embedding) =
+                    reference_schema_vector_configs(Some(&schema), knn);
+                let (defaults_vi, embedding_vi) = extract_vector_configs(&result);
+
+                prop_assert_eq!(defaults_vi, expected_defaults);
+                prop_assert_eq!(embedding_vi, expected_embedding);
+            }
+        }
+    }
 }
