@@ -12,6 +12,7 @@ from typing import (
     get_args,
     TYPE_CHECKING,
     Final,
+    Type,
 )
 from copy import deepcopy
 from typing_extensions import TypeAlias
@@ -20,7 +21,7 @@ from numpy.typing import NDArray
 import numpy as np
 import warnings
 from typing_extensions import TypedDict, Protocol, runtime_checkable
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 import chromadb.errors as errors
 from chromadb.base_types import (
@@ -1493,8 +1494,50 @@ def validate_sparse_embedding_function(
 
 
 # Index Configuration Types for Collection Schema
+def _create_extra_fields_validator(valid_fields: list[str]) -> Any:
+    """Create a model validator that provides helpful error messages for invalid fields."""
+
+    @model_validator(mode="before")
+    def validate_extra_fields(cls: Type[BaseModel], data: Any) -> Any:
+        if isinstance(data, dict):
+            invalid_fields = [k for k in data.keys() if k not in valid_fields]
+            if invalid_fields:
+                valid_fields_str = (
+                    ", ".join(f"'{f}'" for f in valid_fields)
+                    if valid_fields
+                    else "(none)"
+                )
+                invalid_fields_str = ", ".join(f"'{f}'" for f in invalid_fields)
+                class_name = cls.__name__
+                # Create a clear, actionable error message
+                if len(invalid_fields) == 1:
+                    msg = (
+                        f"'{invalid_fields[0]}' is not a valid field for {class_name}. "
+                        f"Valid fields are: {valid_fields_str}"
+                    )
+                else:
+                    msg = (
+                        f"Invalid fields for {class_name}: {invalid_fields_str}. "
+                        f"Valid fields are: {valid_fields_str}"
+                    )
+                from pydantic_core import PydanticCustomError
+
+                raise PydanticCustomError(
+                    "invalid_field",
+                    msg,
+                    {"invalid_fields": invalid_fields, "valid_fields": valid_fields},
+                )
+        return data
+
+    return validate_extra_fields
+
+
 class FtsIndexConfig(BaseModel):
     """Configuration for Full-Text Search index. No parameters required."""
+
+    model_config = {"extra": "ignore"}
+
+    _validate_extra_fields = _create_extra_fields_validator([])
 
     pass
 
@@ -1527,7 +1570,12 @@ class SpannIndexConfig(BaseModel):
 class VectorIndexConfig(BaseModel):
     """Configuration for vector index with space, embedding function, and algorithm config."""
 
-    model_config = {"arbitrary_types_allowed": True}
+    model_config = {"arbitrary_types_allowed": True, "extra": "ignore"}
+
+    _validate_extra_fields = _create_extra_fields_validator(
+        ["space", "embedding_function", "source_key", "hnsw", "spann"]
+    )
+
     space: Optional[Space] = None
     embedding_function: Optional[Any] = DefaultEmbeddingFunction()
     source_key: Optional[
@@ -1577,7 +1625,12 @@ class VectorIndexConfig(BaseModel):
 class SparseVectorIndexConfig(BaseModel):
     """Configuration for sparse vector index."""
 
-    model_config = {"arbitrary_types_allowed": True}
+    model_config = {"arbitrary_types_allowed": True, "extra": "ignore"}
+
+    _validate_extra_fields = _create_extra_fields_validator(
+        ["embedding_function", "source_key", "bm25"]
+    )
+
     # TODO(Sanket): Change this to the appropriate sparse ef and use a default here.
     embedding_function: Optional[Any] = None
     source_key: Optional[
@@ -1628,11 +1681,19 @@ class SparseVectorIndexConfig(BaseModel):
 class StringInvertedIndexConfig(BaseModel):
     """Configuration for string inverted index."""
 
+    model_config = {"extra": "ignore"}
+
+    _validate_extra_fields = _create_extra_fields_validator([])
+
     pass
 
 
 class IntInvertedIndexConfig(BaseModel):
     """Configuration for integer inverted index."""
+
+    model_config = {"extra": "ignore"}
+
+    _validate_extra_fields = _create_extra_fields_validator([])
 
     pass
 
@@ -1640,11 +1701,19 @@ class IntInvertedIndexConfig(BaseModel):
 class FloatInvertedIndexConfig(BaseModel):
     """Configuration for float inverted index."""
 
+    model_config = {"extra": "ignore"}
+
+    _validate_extra_fields = _create_extra_fields_validator([])
+
     pass
 
 
 class BoolInvertedIndexConfig(BaseModel):
     """Configuration for boolean inverted index."""
+
+    model_config = {"extra": "ignore"}
+
+    _validate_extra_fields = _create_extra_fields_validator([])
 
     pass
 
